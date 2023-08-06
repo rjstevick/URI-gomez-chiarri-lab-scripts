@@ -1,7 +1,6 @@
 # URI Gomez-Chiarri Lab scripts
 
 Data analysis scripts and pipelines used in the Gomez-Chiarri lab @ Univeristy of Rhode Island  
-Please check dates and databases - then proceed with caution
 
 **Contact:** gomezchi (at) uri.edu
 
@@ -9,7 +8,8 @@ Please check dates and databases - then proceed with caution
 
 # Contents
 
-General scripts are provided in this repo where appropriate.  
+General scripts are provided in this repo where appropriate. Please check dates and databases - then proceed with caution.
+
 Examples from previous publications are also listed below.   
 
 
@@ -26,11 +26,12 @@ Examples from previous publications are also listed below.
 
 ## Microbiome
 
-1. [16S-Analysis/](16S-Analysis) using QIIME2
+### 1. [16S-Analysis/](16S-Analysis) using QIIME2
   - [rjstevick/RWUOysterHatcheryProbiotics16S](https://github.com/rjstevick/RWUOysterHatcheryProbiotics16S)
   - [rjstevick/PJnitrogenOysterMicrobiomes/16SampliconAnalysis](https://github.com/rjstevick/PJnitrogenOysterMicrobiomes/tree/master/16SampliconAnalysis)
-  - [rjstevick/NBayTNCoystersAnalysis/16SampliconAnalysis](https://github.com/rjstevick/NBayTNCoystersAnalysis/tree/master/16SampliconAnalysis)
-2. [Metranscriptomics/](Metatranscriptomics)
+  - [rjstevick/NBayTNCoystersAnalysis/16SampliconAnalysis](https://github.com/rjstevick/NBayTNCoystersAnalysis/tree/master/16SampliconAnalysis)  
+  
+### 2. [Metranscriptomics/](Metatranscriptomics)
   - [rjstevick/PJnitrogenOysterMicrobiomes/metatranscriptomeAnalysis](https://github.com/rjstevick/PJnitrogenOysterMicrobiomes/tree/master/metatranscriptomeAnalysis)
   - [rjstevick/NBayTNCoystersAnalysis/MetatranscriptomeAnalysis](https://github.com/rjstevick/NBayTNCoystersAnalysis/tree/master/MetatranscriptomeAnalysis)
 
