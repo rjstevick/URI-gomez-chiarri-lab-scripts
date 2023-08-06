@@ -1,6 +1,6 @@
-# URI Gomez-Chiarri Lab scripts
+# URI Gómez-Chiarri Lab scripts
 
-Data analysis scripts and pipelines used in the Gomez-Chiarri lab @ Univeristy of Rhode Island  
+Data analysis scripts and pipelines used in the Gómez-Chiarri lab @ Univeristy of Rhode Island  
 
 **Contact:** gomezchi (at) uri.edu
 
@@ -38,7 +38,7 @@ General scripts are provided in this repo where appropriate. Please check dates 
 
 ## Bacteria
 
-### 1. [Genome-Assembly/](Genome-Assembly)
+### 1. [Bacterial-Genome-Assembly/](Bacterial-Genome-Assembly)
   - [jesscoppersmith/PhaeobacterS4Sm-genome-assembly](https://github.com/jesscoppersmith/PhaeobacterS4Sm-genome-assembly)
 
 ### 2. Pangenome-Analysis

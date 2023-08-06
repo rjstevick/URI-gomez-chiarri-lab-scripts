@@ -1,0 +1,757 @@
+---
+title: "16S rRNA amplicons analysis"
+author: ""
+date: ""
+output:
+  html_document:
+    toc: true
+    keep_md: TRUE
+    theme: "cerulean"
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+---
+
+# About the Data
+
+## Conditions
+
+## Sequencing
+
+## Analysis
+
+Initially done with QIIME2, dada2 denoising. Eukaryotic reads removed here.
+
+# Setup
+
+## Load libraries and settings
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(scales)
+library(ggpubr)
+library(qiime2R)
+library(vegan)
+library(gt)
+library(patchwork)
+library(UpSetR)
+library(gplots)
+library(ggh4x)
+library(ComplexHeatmap)
+
+# set global theme
+theme_set(theme_classic()+
+             theme(legend.position ="none",
+                   panel.background = element_blank(), plot.background = element_blank(),
+                   axis.title = element_text(size=18),
+                   legend.title = element_text(size=18, face="bold"),
+                   axis.text = element_text(size=15),
+                   legend.background = element_blank(),
+                   legend.text = element_text(size=18),
+                   strip.text = element_text(size=22),
+                   plot.title = element_text(hjust=0.5, size=22),
+                   strip.background = element_rect(fill="grey80", color="transparent")))
+
+set.seed(567)
+
+# set global options for code output
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE,message=FALSE)
+
+```
+
+## Import data
+
+```{r import}
+
+# set file paths for metadata and qiime2 output
+metadatafile <- "metadata/Metadata.txt"
+tablefile <- "qiime2output/table.qza"
+taxonomyfile <- "qiime2output/taxonomy.qza"
+
+# make ASV table per sample
+SVs<-read_qza(tablefile)$data
+
+# make dataframe from metadata
+metadata<-read_q2metadata(metadatafile)
+
+# make dataframe of taxomony per ASV
+taxonomy<-read_qza(taxonomyfile)$data %>% parse_taxonomy()
+
+```
+
+## Clean up data
+
+```{r summarize}
+
+# vector of non-bacterial ASVs
+eukASVs <- taxonomy %>%
+   filter(Kingdom=="d__Eukaryota" | Kingdom=="Unassigned" | Phylum=='Cyanobacteria' | Kingdom=='d__Archaea' ) %>%
+   rownames_to_column("ASVs")
+
+# clean up ASV data
+datafullASVs <-
+   # transpose ASV matrix and make dataframe
+   t(SVs) %>% as.data.frame() %>%
+   # set sample names as a column
+   rownames_to_column("SampleID") %>%
+   # add in the metadata
+   full_join(metadata) %>%
+   # make into long form
+   pivot_longer("4d42c811fce6eaabd10ae7ce7334bf7f":"1467c8a6122ac19b493fb587db2b32c9") %>%
+   # remove non-bacterial ASVs
+   filter(!name %in% eukASVs$ASVs)
+
+# clean up ASV data
+dataASVsClean <- datafullASVs %>%
+   # calculate percent abundance from counts
+   group_by(SampleID) %>% mutate(percent=value/sum(value)) %>%
+   # add in all taxonomy data
+   left_join(taxonomy %>% rownames_to_column("name"))
+
+# aggregate data per level
+taxasumsclean <- as.data.frame(SVs) %>%
+   rownames_to_column("ASV") %>%
+   filter(ASV %in% datafullASVs$name) %>%
+   column_to_rownames(var="ASV") %>% qiime2R::summarize_taxa(taxonomy)
+
+# clean up ASV matrix table
+SVsControls <- as.data.frame(SVs) %>%
+   # set ASV names as a column
+   rownames_to_column("ASV") %>%
+   filter(ASV %in% datafullASVs$name) %>%
+   # set ASV names as rownames, then transpose
+   column_to_rownames(var="ASV") %>% t()
+
+# check that the ASVs in datafullASVscutoff match SVsControls
+setdiff(colnames(SVsControls), unique(datafullASVs$name))
+
+```
+
+-----
+
+# General QC
+
+## Sequencing controls
+
+*Mock expected - Zymo*
+
+```{r expcontrols}
+
+# expected mock abundances and plot
+mockplot <- tibble(SampleName="Expected_Mock",value=0,
+   MockTaxa=factor(c("Pseudomonas aeruginosa", "Escherichia coli",
+                     "Salmonella enterica", "Enterococcus faecalis",
+                     "Lactobacillus fermentum","Staphylococcus aureus",
+                     "Listeria monocytogenes", "Bacillus subtilis")),
+   percent=c(4.2,10.1,10.4,9.9,18.4,15.5,14.1,17.4)) %>%
+   ggplot(aes(x=SampleName, y=percent, fill=MockTaxa))+
+   geom_col(position="fill", alpha=0.8)+
+   theme(legend.text = element_text(size=12, colour="gray20", margin = margin(b = 10, unit = "pt")),
+         legend.position = "right",legend.direction = "vertical",
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30"))+
+   scale_fill_manual(values=c("#c5543a","#b8995a","#9cd250","#6eb386",
+                              "#8c9fc3","#7e4abb","#c45891","#4b393e"))+
+   scale_y_continuous(labels = scales::percent_format(), expand=c(0,0))+
+   labs(y="Expected mock species abundance",x=NULL,fill="Mock species", title="Expected mock")
+mockplot
+
+```
+
+*Positive control*
+
+```{r poscontrol, fig.width=15, fig.height=8}
+
+# sequenced blank and mock control plot
+seqmockcontrol <-
+   # transpose ASV matrix and make dataframe
+   datafullASVs %>%
+   # select only positive control data
+   filter(SampleName=="MOCK.CON") %>%
+   filter(value!=0) %>%
+   # add in taxonomy and new column of ASV name
+   left_join(read_qza(taxonomyfile)$data, by=c("name"="Feature.ID")) %>%
+   unite("ASVname", c("name", "Taxon"), sep=": \n") %>%
+   # filter just top 20 taxa, group all Others
+   mutate(TaxaOther=forcats::fct_lump_n(f=ASVname, w=value, other_level="Others", n=10)) %>%
+   mutate(TaxaOther=reorder(TaxaOther, -value)) %>%
+   # calculate percentages per taxa per Sample
+   group_by(SampleName) %>% mutate(percent=value/sum(value))
+
+
+# make palette based on expected mock
+pospalettess2<- seqmockcontrol %>%
+   mutate(colorpal = case_when(grepl("Escherichia",TaxaOther) ~"#9cd250",
+                               grepl("446cc8",TaxaOther) ~ "#c45891",
+                               grepl("Enterobacteriaceae", TaxaOther) ~ "#b8995a",
+                               grepl("Pseudomonas",TaxaOther) ~ "#7e4abb",
+                               grepl("Staphylococcaceae",TaxaOther) ~ "#4b393e",
+                               grepl("Listeria",TaxaOther) ~"#8c9fc3",
+                               grepl("Lactobacillales",TaxaOther) ~ "#6eb386",
+                               grepl("Bacillus",TaxaOther) ~ "#c5543a",
+                               TaxaOther=="Others" ~ "grey40"))
+
+colors <- distinct(pospalettess2, TaxaOther, colorpal)
+pal <- colors$colorpal
+names(pal) <- colors$TaxaOther
+
+posconperc <- seqmockcontrol %>%
+   ggplot(aes(x=SampleName, y=percent, fill=TaxaOther))+
+   geom_col(position="fill", alpha=0.8, color="white")+
+   theme(legend.text = element_text(size=12, colour="gray20", margin = margin(b = 10, unit = "pt")),
+         legend.position = "right",legend.direction = "vertical",
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30")) +
+   scale_fill_manual(values=pal) +
+   scale_y_continuous(labels = scales::percent_format(), expand=c(0,0))+
+   labs(y="Percent ASV abundance",x=NULL,fill="Positive control ASV", title="Positive")
+posconperc
+
+```
+
+
+*Negative control*
+
+```{r negcontrol, fig.width=15, fig.height=8}
+
+negconperc <-
+   datafullASVs %>%
+   # select only negative control data
+   filter(SampleName=="NEG.CON") %>%
+   filter(value!=0) %>%
+   # add in taxonomy and new column of ASV name
+   left_join(read_qza(taxonomyfile)$data, by=c("name"="Feature.ID")) %>%
+   unite("ASVname", c("name", "Taxon"), sep=": \n") %>%
+   # filter just top 20 taxa, group all Others
+   mutate(TaxaOther=forcats::fct_lump_n(f=ASVname, w=value, other_level="Others", n=12)) %>%
+   mutate(TaxaOther=reorder(TaxaOther, -value)) %>%
+   # calculate percentages per taxa per Sample
+   group_by(SampleName) %>% mutate(percent=value/sum(value)) %>%
+   ggplot(aes(x=SampleName, y=percent, fill=TaxaOther))+
+   geom_col(position="fill", alpha=0.8)+
+   theme(legend.text = element_text(size=12, colour="gray20", margin = margin(b = 10, unit = "pt")),
+         legend.position = "right",legend.direction = "vertical",
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30"))+
+   scale_fill_manual(values=c("#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00",
+              "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928","grey40"))+
+   scale_y_continuous(labels = scales::percent_format(), expand=c(0,0))+
+   labs(y="Percent ASV abundance",x=NULL, fill="Negative control ASV", title="Negative")
+negconperc
+
+```
+
+*Summary figure*
+
+```{r controlsummary, fig.width=20, fig.height=12}
+
+mockplot+posconperc+negconperc+
+   plot_layout(guides="collect") & theme(legend.position = "bottom")
+
+```
+
+
+## Reads per sample
+
+```{r readnumber, fig.width=16, fig.height=4}
+
+reads <- dataASVsClean %>%
+   group_by(SampleID) %>% mutate(sumreads=sum(value)) %>%
+   # simplify data to one value per sample
+   distinct(SampleID, sumreads) %>%
+   # start plotting
+   ggplot(aes(x=SampleName, y=sumreads, fill=Group))+
+   geom_col(color="white", lwd=0.2)+
+   scale_y_continuous(expand=c(0,0), labels=scales::label_comma())+
+   labs(y="Number of sequences",x=NULL,fill=NULL)+
+   theme(axis.text.x = element_blank(), strip.text = element_text(size=14),
+         axis.ticks.x = element_blank)
+reads
+
+# number reads per sample
+dataASVsClean %>%
+    group_by(SampleID) %>% mutate(sumreads=sum(value)) %>%
+    # simplify data to one value per sample
+    distinct(SampleName, SampleType, Group, sumreads) %>%
+    arrange(sumreads) %>%
+    gt(rowname_col = "row",
+    groupname_col = "group")
+
+# summary
+dataASVsClean %>%
+    group_by(SampleID) %>% mutate(sumreads=sum(value)) %>%
+    # simplify data to one value per sample
+    distinct(SampleName, SampleType, Group, sumreads) %>%
+    ungroup() %>%
+    summarise(mean=mean(sumreads), sd=sd(sumreads), median=median(sumreads),
+              min=min(sumreads), max=max(sumreads))
+
+```
+
+
+## Rarefaction curves
+
+```{r rarefaction}
+
+# number of ASVs per sample
+(S <- specnumber(SVsControls))
+# smallest number of reads in a sample
+(raremax <- min(rowSums(SVsControls)))
+# rarefied number of taxa per sample
+Srare <- vegan::rarefy(SVsControls, raremax)
+# slope at the end of the rarefacetion curve per sample
+Sslope <- vegan::rareslope(SVsControls, raremax)
+
+# plot observed vs rarefied number of ASVs
+plot(S, Srare, xlab = "Observed No. of ASVs", ylab = "Rarefied No. of ASVs")
+abline(0,1)
+# plot slopes
+plot(S, Sslope, xlab = "Observed No. of ASVs", ylab = "Slope at rarefied sample size")
+
+# store rarefaction curves data with 100 steps
+rarecurve_data <- rarecurve(SVsControls, step = 100, sample = raremax)
+
+# clean plot of rarefaction curves
+rareplot<-map_dfr(rarecurve_data, bind_rows) %>%
+   bind_cols(SampleID = rownames(SVsControls),.) %>%
+   pivot_longer(-SampleID) %>%
+   drop_na() %>%
+   mutate(n_seqs = as.numeric(str_replace(name, "N", ""))) %>%
+   select(-name) %>%
+   left_join(metadata) %>%
+   # edit sampletype labels
+   ggplot(aes(x=n_seqs, y=value, group=SampleID, color=Group)) +
+   geom_line(lwd=0.6) +
+   scale_x_continuous(labels=label_comma(), expand=c(0,0))+
+   scale_y_continuous(expand=c(0,0), limits=c(0,NA))+
+   theme(legend.key.width = unit(1.33,"cm"), legend.background = element_blank(),
+         legend.position="right", legend.direction = "vertical")+
+   labs(x = "Number of sequences", y="Number of ASVs detected", color=NULL, lty=NULL)+
+   guides(color=guide_legend(override.aes = list(lwd=4)))
+rareplot
+
+```
+
+### Summary figure
+
+```{r qcsummary, fig.width=11, fig.height=10}
+
+cowplot::plot_grid(reads, rareplot, align="v", axis="l", labels="AUTO", nrow=2)
+
+ggsave("../figures/seqQC.png", bg="transparent", width=11, height=9)
+ggsave("../figures/seqQC.pdf", bg="transparent", width=11, height=9)
+
+```
+
+----
+
+
+# Taxa Barplots
+
+## Phylum level
+
+```{r barsphylum, fig.width=14, fig.height=5}
+
+# set palette
+palettephy<-c("#65d6b6","#97007b","#ffbd68","#014aad","#dbacff","#ddc077",
+             "#f14690", "#009b75","#7a4600","grey60","grey40")
+
+taxaAvgPhylum <-
+   # select aggregated phylum data
+   t(taxasumsclean$Phylum) %>% as.data.frame() %>%
+   # put rownames as SampleID
+   rownames_to_column("SampleID") %>%
+   # join with the metadata
+   left_join(metadata) %>%
+   # convert to long format
+   pivot_longer("d__Bacteria; Abditibacteriota":"d__Bacteria; Zixibacteria") %>%
+   # Clean up the phylum names: remove Bacteria; and change NA to Unknown
+   mutate(Phylum=str_remove(name, "d__Bacteria; "),
+          Phylum=recode(Phylum, "NA"="Unknown")) %>%
+   # Make new column PhylumOther where the least abundant phylas are grouped into "Others"
+   mutate(PhylumOther=forcats::fct_lump_n(f=Phylum, w=value, other_level="Others", n=10)) %>%
+   # calculate sums per sample per PhylumOther
+   group_by(SampleID, PhylumOther) %>% mutate(sumreads=sum(value)) %>%
+   # calculate means per bucket
+   group_by(SampleType, Bucket,PhylumOther) %>% mutate(bucketmeanreads=mean(sumreads)) %>%
+   # remove multiple values per bucket per PhylumOther
+   distinct(PhylumOther, Location, Treatment, SampleType, Group, Bucket, bucketmeanreads) %>%
+   # sum up total mean reads per phylum so we can order them
+   group_by(PhylumOther) %>% mutate(sumphylumOther=sum(bucketmeanreads)) %>% ungroup() %>%
+   # reorder PhylumOther by abundance, then move unknown and other to the end
+   mutate(PhylumOther=fct_reorder(PhylumOther, -sumphylumOther),
+          PhylumOther=fct_relevel(PhylumOther, "Unknown", after = Inf),
+          PhylumOther=fct_relevel(PhylumOther, "Others", after = Inf)) %>%
+   select(-sumphylumOther)
+
+taxaAvgPhylum %>%
+    group_by(PhylumOther) %>%
+    summarise(mean=mean(bucketmeanreads), sd=sd(bucketmeanreads), median=median(bucketmeanreads),
+              min=min(bucketmeanreads), max=max(bucketmeanreads))
+
+# start plotting
+phylabarplot <- taxaAvgPhylum %>%
+   ggplot(aes(x=Bucket, y=bucketmeanreads, fill=PhylumOther))+
+   # panel per sampletype, location, treatment
+   facet_nested(.~SampleType+Location+Treatment, scales="free",space="free",
+                nest_line = element_line(color="white"),
+                strip = strip_nested(
+                text_x = elem_list_text(face = c("bold","bold","bold",NA,NA,NA,NA,NA,NA,
+                                                    NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA),
+                                        size = c(24,24,24,20,20,20,20,20,20,
+                                                    14,14,14,14,14,14,14,14,14,14,14,14))))+
+   # add bars
+   geom_col(position="fill", color="white")+
+   # edit the theme
+   theme(legend.position = "right",
+         legend.background = element_rect(fill=alpha("white", 0.8), color = "transparent"),
+         axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30"))+
+   # set the colors using our palette
+   scale_fill_manual(values=palettephy)+
+   # change the y-axis labels to %
+   scale_y_continuous(labels = scales::percent_format(), expand=c(0,0))+
+   # set the labels
+   labs(y="Percent Abundance",x=NULL,fill="Phylum")
+phylabarplot
+
+```
+
+
+## Order level
+
+```{r orderbar, fig.width=14, fig.height=10}
+
+# set palette
+paletteord <-c("#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C", "#FB9A99","#E31A1C", "#FDBF6F", "#FF7F00",
+             "#CAB2D6", "#6A3D9A", "#FFFF99", "#B15928" ,"grey60","grey40")
+
+# select aggregated order data
+t(taxasumsclean$Order) %>% as.data.frame() %>%
+   # put rownames as SampleID
+   rownames_to_column("SampleID") %>%
+   # join with the metadata
+   left_join(metadata) %>%
+   # convert to long format
+   pivot_longer("d__Bacteria; Abditibacteriota; Abditibacteria; Abditibacteriales":
+                   "d__Bacteria; Zixibacteria; Zixibacteria; Zixibacteria") %>%
+   # Clean up the phylum names: remove Bacteria; and change NA to Unknown
+   mutate(Order=str_remove(name, "d__Bacteria; "),
+          Order=recode(Order, "NA; NA; NA"="Unknown")) %>%
+   # Make new column OrderOther where the least abundant orders are grouped into "Others"
+   mutate(OrderOther=forcats::fct_lump_n(f=Order, w=value, other_level="Others", n=13)) %>%
+   # calculate sums per sample per OrderOther
+   group_by(SampleID, OrderOther) %>% mutate(sumreads=sum(value)) %>%
+   # calculate means per bucket
+   group_by(SampleType, Bucket,OrderOther) %>% mutate(bucketmeanreads=mean(sumreads)) %>%
+   # remove multiple values per bucket per OrderOther
+   distinct(OrderOther, Location, Treatment, SampleType, Group, Bucket, bucketmeanreads) %>%
+   # sum up total mean reads per phylum so we can order them
+   group_by(OrderOther) %>% mutate(sumOrderOther=sum(bucketmeanreads)) %>% ungroup() %>%
+   # reorder OrderOther by abundance, then move unknown and other to the end
+   mutate(OrderOther=fct_reorder(OrderOther, -sumOrderOther),
+          OrderOther=fct_relevel(OrderOther, "Unknown", after = Inf),
+          OrderOther=fct_relevel(OrderOther, "Others", after = Inf)) %>%
+   # start plotting
+   ggplot(aes(x=Bucket, y=bucketmeanreads, fill=OrderOther))+
+   # panel per fish type
+   facet_nested(.~SampleType+Location+Treatment, scales="free",space="free",
+                nest_line = element_line(color="white"),
+                strip = strip_nested(
+                text_x = elem_list_text(face = c("bold","bold","bold",NA,NA,NA,NA,NA,NA,
+                                                    NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA),
+                                        size = c(24,24,24,20,20,20,20,20,20,
+                                                    14,14,14,14,14,14,14,14,14,14,14,14))))+
+   # add bars
+   geom_col(position="fill", color="white")+
+   # edit the theme
+   theme(legend.position = "bottom",
+         legend.background = element_rect(fill=alpha("white", 0.8), color = "transparent"),
+         axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30"))+
+   # set the colors using our palette
+   scale_fill_manual(values=paletteord)+
+   # change the y-axis labels to %
+   scale_y_continuous(labels = scales::percent_format(), expand=c(0,0))+
+   # set the labels
+   labs(y="Percent Abundance per Order",x=NULL,fill="Order")
+
+```
+
+```{r orderheatmap, fig.width=18, fig.height=8}
+
+# select aggregated order data
+t(taxasumsclean$Order) %>% as.data.frame() %>%
+   # put rownames as SampleID
+   rownames_to_column("SampleID") %>%
+   # join with the metadata
+   left_join(metadata) %>%
+   # convert to long format
+   pivot_longer("d__Bacteria; Abditibacteriota; Abditibacteria; Abditibacteriales":
+                   "d__Bacteria; Zixibacteria; Zixibacteria; Zixibacteria") %>%
+   # Clean up the phylum names: remove Bacteria; and change NA to Unknown
+   mutate(Order=str_remove(name, "d__Bacteria; "),
+          Order=recode(Order, "NA; NA; NA"="Unknown")) %>%
+   # Make new column OrderOther where the least abundant orders are grouped into "Others"
+   mutate(OrderOther=forcats::fct_lump_n(f=Order, w=value, other_level="Others", n=25)) %>%
+   # calculate sums per sample per OrderOther
+   group_by(SampleID, OrderOther) %>% mutate(sumreads=sum(value)) %>%
+   # calculate means per bucket
+   group_by(SampleType, Bucket, OrderOther) %>% mutate(bucketmeanreads=mean(sumreads)) %>%
+   # remove multiple values per bucket per OrderOther
+   distinct(OrderOther, Location, Treatment, SampleType, Group, Bucket, bucketmeanreads) %>%
+   # sum up total mean reads per phylum so we can order them
+   group_by(OrderOther) %>% mutate(sumOrderOther=sum(bucketmeanreads)) %>% ungroup() %>%
+   # reorder OrderOther by abundance, then move unknown and other to the end
+   mutate(OrderOther=fct_reorder(OrderOther, -sumOrderOther),
+          OrderOther=fct_relevel(OrderOther, "Unknown", after = Inf),
+          OrderOther=fct_relevel(OrderOther, "Others", after = Inf)) %>%
+   # calculate percent per OrderOther per bucket
+   group_by(Bucket) %>% mutate(sumBucket=sum(bucketmeanreads)) %>%
+   group_by(Bucket, OrderOther) %>% mutate(percOrder = bucketmeanreads/sumBucket) %>%
+   # Get Phylum column and order
+   separate_wider_delim(OrderOther, names = "Phylum", delim="; ", too_many = "drop", cols_remove=FALSE) %>%
+   mutate(Phylum=fct_relevel(Phylum, "Others", after = Inf),
+          Phylum=fct_relevel(Phylum, "Unknown", after = Inf)) %>%
+   # start plotting
+   ggplot(aes(x=Bucket, fill=percOrder, y=OrderOther))+
+   # panel per sampletype, location, treatment
+   facet_nested(Phylum~SampleType+Location+Treatment,
+                scales="free", space="free", nest_line = element_line(color="white"),
+                strip = strip_nested(
+                   background_x = elem_list_rect(fill = alpha(c(
+                      "orange","salmon","darkred",
+                      "seagreen3","cornflowerblue","seagreen3","cornflowerblue","seagreen3","cornflowerblue",
+                      "lightgreen","darkgreen","lightblue","darkblue","lightgreen","darkgreen",
+                      "lightblue","darkblue","lightgreen","darkgreen","lightblue","darkblue"), 0.4)),
+                   text_x = elem_list_text(face = c("bold","bold","bold",NA,NA,NA,NA,NA,NA,
+                                                    NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA),
+                                           size = c(24,24,24,20,20,20,20,20,20,
+                                                    14,14,14,14,14,14,14,14,14,14,14,14))))+
+   # add tiles
+   geom_tile()+
+   scale_fill_gradientn(labels = scales::percent,limits=c(0,0.4),
+                       colours=c("white","#02818a","#016c59","#014636","black"))+
+   theme(axis.text.x = element_blank(), legend.position="bottom",
+         strip.text.x = element_text(size=16, color="black"),strip.text.y = element_blank(),
+         panel.border = element_rect(color="grey", fill="transparent"),
+         axis.ticks.y = element_line(inherit.blank=FALSE, color="grey30"),
+         axis.ticks.x = element_blank(), legend.background = element_blank(),
+         legend.key.size = unit(3, 'lines'))+
+   # set the labels
+   labs(fill="Relative Percent \nAbundance per Order",x=NULL,y=NULL)
+
+ggsave("../figures/orderHeatmap.png", bg="transparent", width=16, height=9)
+ggsave("../figures/orderHeatmap.pdf", bg="transparent", width=16, height=9)
+
+```
+
+
+-----
+
+# Venn Diagrams
+
+## SampleType
+
+At the ASV level for gut/inner/outer
+
+```{r venntype, fig.width=8}
+
+# list of gut ASVs
+gutset <- dataASVsClean %>% ungroup() %>% filter(SampleType=="Gut") %>%
+   filter(value!=0) %>% distinct(name) %>% .$name
+# list of outer ASVs
+outerset <- dataASVsClean %>% ungroup() %>% filter(SampleType=="Outer Shell") %>%
+   filter(value!=0) %>% distinct(name) %>% .$name
+# list of inner ASVs
+innerset <- dataASVsClean %>% ungroup() %>% filter(SampleType=="Inner Shell") %>%
+   filter(value!=0) %>% distinct(name) %>% .$name
+
+setsType <- list("Gut" = gutset, "Inner Shell" = innerset, "Outer Shell" = outerset)
+
+# plot venn diagram
+vennType <- ggVennDiagram::ggVennDiagram(setsType,set_size = 8,
+                                      label_alpha = 0,label_size = 6)+
+   scale_color_manual(values = c("orange", "tomato", "darkred"))+
+   scale_fill_gradient(low="white",high="grey50")+
+   coord_sf(clip = 'off')+theme(legend.position = "none")
+vennType
+
+```
+
+```{r upsettype, fig.width=8}
+
+library(UpSetR)
+mat <- make_comb_mat(setsType)
+
+upsetplotType <- UpSet(mat,    
+      pt_size = unit(.5, "cm"),lwd=2.5,
+      comb_col = c("black","grey50","grey50","grey50","orange", "darkred", "tomato"),
+      left_annotation = upset_left_annotation(mat, bar_width=0.7,
+                                                         axis_param = list(side = "bottom",labels_rot = 0),
+                                                       #  annotation_name_side = "top",
+                                                         gp = gpar(fill = c("orange", "darkred", "tomato")),
+                                                         width = unit(4, "cm")),
+      row_names_side = "left",
+      top_annotation = upset_top_annotation(mat,bar_width = 0.9, height = unit(6, "cm")))
+upsetplotType
+
+```
+
+
+-----
+
+# Alpha Diversity
+
+
+```{r alphadiv, fig.width=8, fig.height=7}
+
+# calculate chao diversity
+chao <- estimateR(SVsControls) %>% t() %>% as.data.frame()
+# calculate shannon
+diversityshannon<-diversity(SVsControls, index="shannon")
+# calculate simpson
+diversitysimpsons<-diversity(SVsControls, index="simpson")
+
+# add into metadata variable
+metadata$Chao <- chao$S.chao1
+metadata$Simpsons<-diversitysimpsons
+metadata$Shannon<-diversityshannon
+
+metadata %>%
+   pivot_longer(Chao:Shannon, names_to="DiversityIndex", values_to="Value") %>%
+   ggplot(aes(x=Group,y=Value, fill=Group, shape=Group))+
+   geom_jitter(width=0.15, size=3, alpha=0.8)+
+   geom_boxplot(alpha=0.8)+
+   geom_hline(yintercept = 0)+
+   stat_compare_means(label.y=0.3)+
+   facet_grid(DiversityIndex~SampleType, scales="free")+
+   labs(x=NULL, y="Index of Diversity")+
+   scale_y_continuous(expand = expansion(mult = c(0, .1)), limits=c(0,NA))+
+   theme(legend.position = "bottom",
+         axis.text.x = element_blank())
+
+```
+
+
+-----
+
+
+# Beta Diversity
+
+```{r betadivsetup}
+
+# ellipse function
+veganCovEllipse<-function (cov, center = c(0, 0), scale = 1, npoints = 100)
+{theta <- (0:npoints) * 2 * pi/npoints
+   Circle <- cbind(cos(theta), sin(theta))
+   t(center + scale * t(Circle %*% chol(cov)))}
+
+```
+
+## All samples together
+
+```{r betaalltogether,  fig.show='hide', fig.width=4}
+
+# metadata without controls
+metadataoyster <- metadata %>% drop_na(Denitrification_18C)
+
+# calculate beta-diversity
+sol<-metaMDS(SVsControls,distance = "bray", k = 2, trymax = 200)
+# plot the solution
+sol$stress; stressplot(sol)
+
+# make clean data  with solution
+NMDS=data.frame(x=sol$point[,1],y=sol$point[,2],
+                SampleType=as.factor(metadataoyster$SampleType),
+                Group=as.factor(metadataoyster$Group))
+```
+
+### by sample type
+
+```{r betatype,  fig.show='hide', fig.width=4}
+
+# make ellipse paths with solution
+plot.new()
+ordType<-ordiellipse(sol, NMDS$SampleType, display = "sites", kind ="sd", conf = 0.95, label = T)
+dev.off()
+
+# store ellipse paths
+df_ellType <- data.frame()
+for(g in levels(NMDS$SampleType)){
+  if(g!="" && (g %in% names(ordType))){
+    df_ellType <- rbind(df_ellType, cbind(as.data.frame(with(NMDS[NMDS$SampleType==g,],
+                                                     veganCovEllipse(ordType[[g]]$cov,ordType[[g]]$center,ordType[[g]]$scale))),SampleType=g))}}
+head(df_ellType)
+# determine center of ellipses
+NMDS.mean.type=aggregate(NMDS[,1:2],list(group=NMDS$SampleType),mean)
+
+adonis2(SVsControls~SampleType, data=metadataoyster, by=NULL,method="bray", k=2)
+
+```
+
+
+```{r plotTypebeta}
+
+betadivType <- ggplot(data=NMDS,aes(x,y,colour=SampleType, fill=SampleType))+
+   geom_path(data=df_ellType, aes(x=NMDS1, y=NMDS2, lty=SampleType), size=1) +
+   geom_point(size=4, alpha=0.8, aes(shape=Group))+
+   scale_shape_manual(values=c(22,23,24,25))+
+   annotate("text",x=NMDS.mean.type$x,y=NMDS.mean.type$y,
+            label=NMDS.mean.type$group, size=5, color="gray40") +
+   scale_fill_manual(values=c("orange", "tomato", "darkred"))+
+   scale_colour_manual(values=c("orange", "tomato", "darkred"))+
+   labs(x=NULL, y=NULL)+
+   ggtitle("Sample Type")+
+   theme(legend.position="right")
+betadivType
+
+```
+
+
+### by location and enrichment
+
+
+```{r betasite,  fig.show='hide', fig.width=4}
+
+# make ellipse paths with solution
+plot.new()
+ordGroup<-ordiellipse(sol, NMDS$Group, display = "sites", kind ="sd", conf = 0.95, label = T)
+dev.off()
+
+# store ellipse paths
+df_ellGroup <- data.frame()
+for(g in levels(NMDS$Group)){
+  if(g!="" && (g %in% names(ordGroup))){
+    df_ellGroup <- rbind(df_ellGroup, cbind(as.data.frame(with(NMDS[NMDS$Group==g,],
+                                                     veganCovEllipse(ordGroup[[g]]$cov,ordGroup[[g]]$center,ordGroup[[g]]$scale))),Group=g))}}
+head(df_ellGroup)
+# determine center of ellipses
+NMDS.mean.group=aggregate(NMDS[,1:2],list(group=NMDS$Group),mean)
+
+adonis2(SVsControls~Group, data=metadataoyster, by=NULL,method="bray", k=2)
+
+```
+
+
+```{r plotSitebeta}
+
+betadivGroup <- ggplot(data=NMDS,aes(x,y,colour=Group, fill=Group))+
+   geom_path(data=df_ellGroup, aes(x=NMDS1, y=NMDS2, lty=Group), size=1) +
+   geom_point(size=4, alpha=0.8, aes(shape=SampleType))+
+   scale_shape_manual(values=c(21,24,22))+
+   annotate("text",x=NMDS.mean.group$x,y=NMDS.mean.group$y,
+            label=NMDS.mean.group$group, size=5, color="gray40") +
+   scale_color_manual(values=c("lightgreen","darkgreen","lightblue","darkblue"))+
+   scale_fill_manual(values=c("lightgreen","darkgreen","lightblue","darkblue"))+
+   labs(x=NULL, y=NULL)+
+   ggtitle("Site and Treatment")+
+   theme(legend.position="right")
+betadivGroup
+
+```
+
+
+
+# Session Info
+
+```{r sessioninfo}
+sessionInfo()
+```
